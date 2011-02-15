@@ -289,22 +289,24 @@ int main(int argc, char **argv)
 		flashsize = atoi(argv[5]) * 1024 * 1024;
 
 
-	int partition[] = {0x40000, 0x400000, flashsize};
+	int partition[3];
 
-	if ((argc >= 7) && strstr(argv[6], "large"))
-	{
+	if ((argc >= 7) && strstr(argv[6], "large")) {
 		largepage = 1;
 		eraseblock_size = 128*1024;
 		spare_size = 64;
 		sector_size = 2048;
-		partition[0] = 0x100000;
-	} else
-	{
+		partition[0] = 0x100000;	// ends at 1 MiB
+		partition[1] = flashsize / 16;	// ends at 4 MiB for 64 MiB or at 16 MiB for 256 MiB
+		partition[2] = flashsize;	// ends at end of flash (e.g. 64 MiB or 256 MiB)
+	} else {
 		largepage = 0;
-		eraseblock_size = 16384;
+		eraseblock_size = 16*1024;
 		spare_size = 16;
 		sector_size = 512;
-		partition[0] = 0x40000;
+		partition[0] = 0x40000;		// ends at 256 KiB
+		partition[1] = 0x400000;	// ends at 4 MiB
+		partition[2] = flashsize;	// ends at end of flash (e.g. 64 MiB)
 	}
 
 	fprintf(stderr, "2nd: %u of %u bytes\n", size_2nd, BADBLOCK_SAFE(partition[0]));
