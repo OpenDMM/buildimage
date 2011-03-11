@@ -1,22 +1,50 @@
 /*
- * buildimage - create Dreambox nand boot image.
+ * buildimage - create a Dreambox NAND boot image
  *
  * contains algorithms ripped from u-boot and first-stage.
- * Licensed as GPL.
+ *
+ * Copyright (C) 2000-2004 Steven J. Hill (sjhill@realitydiluted.com)
+ *                         Toshiba America Electronics Components, Inc.
+ *
+ * Copyright (C) 2006 Thomas Gleixner <tglx@linutronix.de>
+ *
+ * Copyright (C) 2005-2009 Felix Domke <tmbinc@elitedvb.net>
+ * Copyright (C) 2010-2011 Andreas Oberritter <obi@opendreambox.org>
+ *
+ * This file is free software; you can redistribute it and/or modify it
+ * under the terms of the GNU General Public License version 2 as published
+ * by the Free Software Foundation.
  */
 
 #include "buildimage_config.h"
 
+#include <errno.h>
+#include <getopt.h>
+#include <stdbool.h>
 #include <stdio.h>
 #include <stdlib.h>
-#include <unistd.h>
 #include <string.h>
-#include <netinet/in.h>
+#include <sys/stat.h>
+#include <unistd.h>
 
-int eraseblock_size, spare_size, sector_size, largepage;
+/* reserve to two sectors plus 1% for badblocks, and round down */
+#define BADBLOCK_SAFE(x) (((x) - (erase_block_size * 2) - (x) / 100) & ~erase_block_size)
+#define SECTOR_SIZE_WITH_ECC (sector_size + spare_size)
+#define TO_SECT(x) (x + sector_size - 1) / sector_size
 
-#define SECTOR_SIZE_WITH_ECC (sector_size+spare_size)
+typedef void (*fnc_encode_ecc)(unsigned char *dst, unsigned char *src, int cnt);
 
+struct partition {
+	struct partition *next;
+	struct partition *prev;
+	fnc_encode_ecc encode;
+	unsigned int id;
+	const char *filename;
+	FILE *file;
+	size_t part_size;
+	size_t data_size;
+	size_t sectors;
+};
 
 /*
  * Pre-calculated 256-way 1 byte column parity
@@ -37,9 +65,24 @@ static const unsigned char nand_ecc_precalc_table[] = {
 	0x03, 0x56, 0x55, 0x00, 0x5a, 0x0f, 0x0c, 0x59, 0x59, 0x0c, 0x0f, 0x5a, 0x00, 0x55, 0x56, 0x03,
 	0x66, 0x33, 0x30, 0x65, 0x3f, 0x6a, 0x69, 0x3c, 0x3c, 0x69, 0x6a, 0x3f, 0x65, 0x30, 0x33, 0x66,
 	0x65, 0x30, 0x33, 0x66, 0x3c, 0x69, 0x6a, 0x3f, 0x3f, 0x6a, 0x69, 0x3c, 0x66, 0x33, 0x30, 0x65,
-	0x00, 0x55, 0x56, 0x03, 0x59, 0x0c, 0x0f, 0x5a, 0x5a, 0x0f, 0x0c, 0x59, 0x03, 0x56, 0x55, 0x00
+	0x00, 0x55, 0x56, 0x03, 0x59, 0x0c, 0x0f, 0x5a, 0x5a, 0x0f, 0x0c, 0x59, 0x03, 0x56, 0x55, 0x00,
 };
 
+static const struct option options[] = {
+	{ "arch", required_argument, NULL, 'a' },
+	{ "boot-partition", required_argument, NULL, 'b' },
+	{ "data-partition", required_argument, NULL, 'd' },
+	{ "erase-block-size", required_argument, NULL, 'e' },
+	{ "flash-size", required_argument, NULL, 'f' },
+	{ "large-page", no_argument, NULL, 'l' },
+	{ "sector-size", required_argument, NULL, 's' },
+	{ NULL, 0, NULL, 0 },
+};
+
+static struct partition *partitions;
+static unsigned int num_partitions;
+static unsigned long long erase_block_size, spare_size, sector_size, flash_size;
+static bool large_page;
 
 /*
  * Creates non-inverted ECC code from line parity
@@ -84,7 +127,7 @@ static void nand_trans_result(unsigned char reg2, unsigned char reg3,
 /*
  * Calculate 3 byte ECC code for 256 byte block
  */
-static void nand_calculate_ecc (const unsigned char *dat, unsigned char *ecc_code)
+static void nand_calculate_ecc(const unsigned char *dat, unsigned char *ecc_code)
 {
 	unsigned char idx, reg1, reg3;
 	int j;
@@ -95,15 +138,13 @@ static void nand_calculate_ecc (const unsigned char *dat, unsigned char *ecc_cod
 
 	/* Build up column parity */
 	for(j = 0; j < 256; j++) {
-
 		/* Get CP0 - CP5 from table */
 		idx = nand_ecc_precalc_table[dat[j]];
 		reg1 ^= idx;
 
 		/* All bit XOR = 1 ? */
-		if (idx & 0x40) {
+		if (idx & 0x40)
 			reg3 ^= (unsigned char) j;
-		}
 	}
 
 	/* Create non-inverted ECC code from line parity */
@@ -115,38 +156,40 @@ static void nand_calculate_ecc (const unsigned char *dat, unsigned char *ecc_cod
 	ecc_code[2] = ((~reg1) << 2) | 0x03;
 }
 
-void file_open(FILE **f, int *size, const char *filename)
+static bool safe_write(int fd, const unsigned char *buf, size_t count)
 {
-	*f = fopen(filename, "r");
-	if (!*f)
-	{
-		perror(filename);
-		exit(1);
+	size_t pos = 0;
+	ssize_t ret;
+
+	while (pos < count) {
+		errno = 0;
+		ret = write(fd, &buf[pos], count - pos);
+		if (ret < 0) {
+			if (errno != EINTR)
+				return false;
+		} else {
+			pos += ret;
+		}
 	}
-	fseek(*f, 0, SEEK_END);
-	*size = ftell(*f);
-	fseek(*f, 0, SEEK_SET);
+
+	return true;
 }
 
-void die(const char *msg)
+static bool emit_4(unsigned int val)
 {
-	fprintf(stderr, "%s\n", msg);
-	exit(2);
+	unsigned char buf[4];
+
+	buf[0] = (val >> 24) & 0xff;
+	buf[1] = (val >> 16) & 0xff;
+	buf[2] = (val >>  8) & 0xff;
+	buf[3] = (val >>  0) & 0xff;
+
+	return safe_write(1, buf, 4);
 }
 
-void emit_4(unsigned long val)
+static void encode_hevers(unsigned char *dst, unsigned char *src, int count)
 {
-	val = htonl(val);
-	write(1, &val, 4);
-}
-
-#define TO_SECT(x) (x+sector_size-1)/sector_size
-
-typedef void fnc_encode_ecc(unsigned char *dst, unsigned char *src, int cnt);
-
-void encode_hevers(unsigned char *dst, unsigned char *src, int count)
-{
-	if (!largepage)
+	if (!large_page)
 	{
 		dst[0] = count >> 8;
 		dst[1] = count & 0xFF;
@@ -197,11 +240,11 @@ void encode_hevers(unsigned char *dst, unsigned char *src, int count)
 	}
 }
 
-void encode_jffs2(unsigned char *dst, unsigned char *src, int cnt)
+static void encode_jffs2(unsigned char *dst, unsigned char *src, int cnt)
 {
 	memset(dst, 0xFF, spare_size);
 
-	if (!largepage)
+	if (!large_page)
 	{
 		unsigned char ecc_code[8];
 		nand_calculate_ecc (src, ecc_code);
@@ -215,7 +258,7 @@ void encode_jffs2(unsigned char *dst, unsigned char *src, int cnt)
 		dst[6] = ecc_code[4];
 		dst[7] = ecc_code[5];
 
-		if (!(cnt & ((eraseblock_size/sector_size)-1)))
+		if (!(cnt & ((erase_block_size/sector_size)-1)))
 		{
 			dst[8]  = 0x19;
 			dst[9]  = 0x85;
@@ -233,7 +276,7 @@ void encode_jffs2(unsigned char *dst, unsigned char *src, int cnt)
 		for (i=0; i<8; ++i)
 			nand_calculate_ecc (src + i * 256, dst + 40 + i * 3);
 
-		if (!(cnt & ((eraseblock_size/sector_size)-1)))
+		if (!(cnt & ((erase_block_size/sector_size)-1)))
 		{
 			dst[2] = 0x19;
 			dst[3] = 0x85;
@@ -247,107 +290,200 @@ void encode_jffs2(unsigned char *dst, unsigned char *src, int cnt)
 	}
 }
 
-void emit_file(FILE *src, int size, fnc_encode_ecc * eccfnc)
+static bool emit_partition(struct partition *p)
 {
-	emit_4(size * SECTOR_SIZE_WITH_ECC);
-	int cnt = 0;
-	while (1)
-	{
+	unsigned int cnt;
+
+	if (!emit_4(p->part_size * SECTOR_SIZE_WITH_ECC)) {
+		fprintf(stderr, "Couldn't write partition size\n");
+		return false;
+	}
+
+	for (cnt = 0; cnt < p->sectors; cnt++) {
 		unsigned char sector[sector_size + spare_size];
 		memset(sector, 0xFF, sector_size + spare_size);
-		int r = fread(sector, 1, sector_size, src);
+		int r = fread(sector, 1, sector_size, p->file);
 		if (!r)
 			break;
-		eccfnc(sector + sector_size, sector, cnt);
-		write(1, sector, SECTOR_SIZE_WITH_ECC);
-		++cnt;
+		p->encode(sector + sector_size, sector, cnt);
+		if (!safe_write(1, sector, SECTOR_SIZE_WITH_ECC)) {
+			fprintf(stderr, "Couldn't write sector\n");
+			return false;
+		}
 	}
-	if (cnt != size)
-		die("size changed");
+
+	return true;
 }
 
-	/* reserve to two sectors plus 1% for badblocks, and round down */
-#define BADBLOCK_SAFE(x) ( ((x) - (eraseblock_size * 2) - (x) / 100) &~ eraseblock_size )
-
-int main(int argc, char **argv)
+static bool partition_append(const char *option, fnc_encode_ecc encode)
 {
-	if ((argc != 4) && (argc != 5) && (argc != 6) && (argc != 7) )
-	{
-		fprintf(stderr, "usage: %s <2nd.bin.gz> <boot.jffs2> <root.jffs2> [<arch>] [<flashsize-in-mb>] [options]> image.nfi\n", *argv);
-		return 1;
+	const char *filename;
+	struct partition *p;
+	unsigned long long val;
+	struct stat st;
+	FILE *f;
+	char *end;
+
+	errno = 0;
+	val = strtoull(option, &end, 0);
+	if ((errno != 0) || (end == NULL) || (*end != ':'))
+		return false;
+
+	filename = (end + 1);
+	if (stat(filename, &st) < 0) {
+		perror(filename);
+		return false;
 	}
 
-	FILE *f_2nd, *f_boot, *f_root;
-	int size_2nd, size_boot, size_root;
+	fprintf(stderr, "Partition #%u: %llu of %llu bytes (%s)\n", num_partitions, val, BADBLOCK_SAFE(st.st_size), filename);
+	if (val > BADBLOCK_SAFE(st.st_size)) {
+		fprintf(stderr, "Partition #%u (%s) is too big. This doesn't work. Sorry.", num_partitions, filename);
+		return false;
+	}
 
-	file_open(&f_2nd, &size_2nd, argv[1]);
-	file_open(&f_boot, &size_boot, argv[2]);
-	file_open(&f_root, &size_root, argv[3]);
+	f = fopen(filename, "r");
+	if (f == NULL) {
+		perror(filename);
+		return false;
+	}
 
-	int flashsize = 32*1024*1024;
-	if (argc >= 6)
-		flashsize = atoi(argv[5]) * 1024 * 1024;
+	p = malloc(sizeof(struct partition));
+	if (p == NULL) {
+		perror("malloc");
+		fclose(f);
+		return false;
+	}
 
+	p->id = num_partitions++;
+	p->encode = encode;
+	p->filename = filename;
+	p->part_size = val;
+	p->data_size = st.st_size;
+	p->sectors = TO_SECT(val);
+	p->file = f;
 
-	int partition[3];
-
-	if ((argc >= 7) && strstr(argv[6], "large")) {
-		largepage = 1;
-		eraseblock_size = 128*1024;
-		spare_size = 64;
-		sector_size = 2048;
-		partition[0] = 0x100000;	// ends at 1 MiB
-		partition[1] = flashsize / 16;	// ends at 4 MiB for 64 MiB or at 16 MiB for 256 MiB
-		partition[2] = flashsize;	// ends at end of flash (e.g. 64 MiB or 256 MiB)
+	p->next = NULL;
+	if (partitions == NULL) {
+		partitions = p;
+		p->prev = NULL;
 	} else {
-		largepage = 0;
-		eraseblock_size = 16*1024;
-		spare_size = 16;
-		sector_size = 512;
-		partition[0] = 0x40000;		// ends at 256 KiB
-		partition[1] = 0x400000;	// ends at 4 MiB
-		partition[2] = flashsize;	// ends at end of flash (e.g. 64 MiB)
+		p->prev = partitions->prev;
+		p->prev->next = p;
+		partitions->prev = p;
 	}
 
-	fprintf(stderr, "2nd: %u of %u bytes\n", size_2nd, BADBLOCK_SAFE(partition[0]));
-	fprintf(stderr, "boot: %u of %u bytes\n", size_boot, BADBLOCK_SAFE(partition[1] - partition[0]));
-	fprintf(stderr, "root: %u of %u bytes\n", size_root, BADBLOCK_SAFE(partition[2] - partition[1]));
+	return true;
+}
 
-	if (size_2nd > BADBLOCK_SAFE(partition[0]))
-		die("2nd stage is too big. did you gzip it before?");
-	if (size_boot > BADBLOCK_SAFE(partition[1] - partition[0]))
-		die("boot is too big. You can modify the buildimage tool, but you don't want that.");
-	if (size_root > BADBLOCK_SAFE(partition[2] - partition[1]))
-		die("root is too big. This doesn't work. sorry.");
+static bool parse_size(const char *option, unsigned long long *size)
+{
+	errno = 0;
+	*size = strtoull(optarg, NULL, 0);
+	return (errno == 0);
+}
 
-	int sectors_2nd = TO_SECT(size_2nd), sectors_boot = TO_SECT(size_boot), sectors_root = TO_SECT(size_root);
+int main(int argc, char *argv[])
+{
+	struct partition *p;
+	const char *arch = NULL;
+	int opt;
 
-	int num_partitions = 3;
+	while ((opt = getopt_long(argc, argv, "a:b:d:e:f:lo:s:", options, NULL)) != -1) {
+		switch (opt) {
+		case 'a':
+			if (strlen(optarg) > 27) {
+				fprintf(stderr, "Invalid arch!\n");
+				return EXIT_FAILURE;
+			}
+			arch = optarg;
+			break;
+		case 'b':
+			if (!partition_append(optarg, encode_hevers)) {
+				fprintf(stderr, "Invalid boot partition!\n");
+				return EXIT_FAILURE;
+			}
+			break;
+		case 'd':
+			if (!partition_append(optarg, encode_jffs2)) {
+				fprintf(stderr, "Invalid data partition!\n");
+				return EXIT_FAILURE;
+			}
+			break;
+		case 'e':
+			/* minimum: 16 KiB */
+			if (!parse_size(optarg, &erase_block_size) || (erase_block_size & 0x3fff)) {
+				fprintf(stderr, "Invalid erase block size!\n");
+				return EXIT_FAILURE;
+			}
+			break;
+		case 'f':
+			/* minimum: 32 MiB */
+			if (!parse_size(optarg, &flash_size) || (flash_size & 0x1ffffff)) {
+				fprintf(stderr, "Invalid flash size!\n");
+				return EXIT_FAILURE;
+			}
+			break;
+		case 'l':
+			large_page = true;
+			break;
+		case 's':
+			/* minimum: 512 bytes */
+			if (!parse_size(optarg, &sector_size) || (sector_size & 0x1ff)) {
+				fprintf(stderr, "Invalid sector size!\n");
+				return EXIT_FAILURE;
+			}
+			break;
+		default:
+			fprintf(stderr, "Invalid arguments!\n");
+			return EXIT_FAILURE;
+		}
+	}
 
-	int total_size = 4 + num_partitions * 4 + 4 + sectors_2nd * SECTOR_SIZE_WITH_ECC + 4 + sectors_boot * SECTOR_SIZE_WITH_ECC + 4 + sectors_root * SECTOR_SIZE_WITH_ECC;
+	if (optind < argc) {
+		fprintf(stderr, "Invalid arguments!\n");
+		return EXIT_FAILURE;
+	}
 
-		/* in case an architecture is given, write NFI1 header */
-	if (argc >= 5)
-	{
+	spare_size = sector_size / 32;
+
+	/* write NFI1 header */
+	if (arch != NULL) {
 		char header[32] = "NFI1";
-		strncpy(header + 4, argv[4], 28);
-		write(1, header, 32);
+		strncpy(header + 4, arch, 28);
+		if (!safe_write(1, header, 32)) {
+			fprintf(stderr, "Couldn't write NFI header!\n");
+			return EXIT_FAILURE;
+		}
 	}
 
-		/* global header */
-	emit_4(total_size);
+	unsigned int total_size = 4 + num_partitions * 4;
+	for (p = partitions; p != NULL; p = p->next)
+		total_size += 4 + p->sectors * SECTOR_SIZE_WITH_ECC;
 
-		/* partition */
-	emit_4(num_partitions * 4);
-	int i;
-	for (i=0; i < num_partitions; ++i)
-		emit_4(partition[i]);
+	/* global header */
+	if (!emit_4(total_size)) {
+		fprintf(stderr, "Couldn't write total size\n");
+		return EXIT_FAILURE;
+	}
 
-		/* 2nd stage */
-	emit_file(f_2nd, sectors_2nd, encode_hevers);
-		/* boot + root */
-	emit_file(f_boot, sectors_boot, encode_jffs2);
-	emit_file(f_root, sectors_root, encode_jffs2);
+	/* partition */
+	if (!emit_4(num_partitions * 4)) {
+		fprintf(stderr, "Couldn't write number of partitions\n");
+		return EXIT_FAILURE;
+	}
 
-	return 0;
+	unsigned int endptr = 0;
+	for (p = partitions; p != NULL; p = p->next) {
+		endptr += p->part_size;
+		if (!emit_4(endptr)) {
+			fprintf(stderr, "Couldn't write partition pointer\n");
+			return EXIT_FAILURE;
+		}
+	}
+
+	for (p = partitions; p != NULL; p = p->next)
+		if (!emit_partition(p))
+			return EXIT_FAILURE;
+
+	return EXIT_SUCCESS;
 }
