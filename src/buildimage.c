@@ -36,7 +36,6 @@ typedef void (*fnc_encode_ecc)(unsigned char *dst, unsigned char *src, int cnt);
 
 struct partition {
 	struct partition *next;
-	struct partition *prev;
 	fnc_encode_ecc encode;
 	unsigned int id;
 	const char *filename;
@@ -365,11 +364,11 @@ static bool partition_append(const char *option, fnc_encode_ecc encode)
 	p->next = NULL;
 	if (partitions == NULL) {
 		partitions = p;
-		p->prev = NULL;
 	} else {
-		p->prev = partitions->prev;
-		p->prev->next = p;
-		partitions->prev = p;
+		struct partition *q = partitions;
+		while (q->next)
+			q = q->next;
+		q->next = p;
 	}
 
 	return true;
