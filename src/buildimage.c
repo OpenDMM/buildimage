@@ -27,11 +27,6 @@
 #include <sys/stat.h>
 #include <unistd.h>
 
-/* reserve to two sectors plus 1% for badblocks, and round down */
-#define BADBLOCK_SAFE(x) (((x) - (erase_block_size * 2) - (x) / 100) & ~erase_block_size)
-#define SECTOR_SIZE_WITH_ECC (sector_size + spare_size)
-#define TO_SECT(x) (x + sector_size - 1) / sector_size
-
 typedef void (*fnc_encode_ecc)(unsigned char *dst, unsigned char *src, int cnt);
 
 struct partition {
@@ -82,6 +77,22 @@ static struct partition *partitions;
 static unsigned int num_partitions;
 static unsigned long long erase_block_size, spare_size, sector_size, flash_size;
 static bool large_page;
+
+/* reserve to two sectors plus 1% for badblocks, and round down */
+static inline size_t badblock_safe(size_t x)
+{
+	return (x - (erase_block_size * 2) - (x / 100)) & ~erase_block_size;
+}
+
+static inline size_t sector_size_with_ecc(void)
+{
+	return sector_size + spare_size;
+}
+
+static inline size_t to_sect(size_t x)
+{
+	return (x + sector_size - 1) / sector_size;
+}
 
 /*
  * Creates non-inverted ECC code from line parity
@@ -293,7 +304,7 @@ static bool emit_partition(struct partition *p)
 {
 	unsigned int cnt;
 
-	if (!emit_4(p->part_size * SECTOR_SIZE_WITH_ECC)) {
+	if (!emit_4(to_sect(p->data_size) * sector_size_with_ecc())) {
 		fprintf(stderr, "Couldn't write partition size\n");
 		return false;
 	}
@@ -305,7 +316,7 @@ static bool emit_partition(struct partition *p)
 		if (!r)
 			break;
 		p->encode(sector + sector_size, sector, cnt);
-		if (!safe_write(1, sector, SECTOR_SIZE_WITH_ECC)) {
+		if (!safe_write(1, sector, sector_size_with_ecc())) {
 			fprintf(stderr, "Couldn't write sector\n");
 			return false;
 		}
@@ -334,8 +345,8 @@ static bool partition_append(const char *option, fnc_encode_ecc encode)
 		return false;
 	}
 
-	fprintf(stderr, "Partition #%u: %llu of %llu bytes (%s)\n", num_partitions, val, BADBLOCK_SAFE(st.st_size), filename);
-	if (val > BADBLOCK_SAFE(st.st_size)) {
+	fprintf(stderr, "Partition #%u: %llu of %zu bytes (%s)\n", num_partitions, val, badblock_safe(st.st_size), filename);
+	if (val > badblock_safe(st.st_size)) {
 		fprintf(stderr, "Partition #%u (%s) is too big. This doesn't work. Sorry.", num_partitions, filename);
 		return false;
 	}
@@ -358,7 +369,7 @@ static bool partition_append(const char *option, fnc_encode_ecc encode)
 	p->filename = filename;
 	p->part_size = val;
 	p->data_size = st.st_size;
-	p->sectors = TO_SECT(val);
+	p->sectors = to_sect(st.st_size);
 	p->file = f;
 
 	p->next = NULL;
@@ -457,7 +468,7 @@ int main(int argc, char *argv[])
 
 	unsigned int total_size = 4 + num_partitions * 4;
 	for (p = partitions; p != NULL; p = p->next)
-		total_size += 4 + p->sectors * SECTOR_SIZE_WITH_ECC;
+		total_size += 4 + p->sectors * sector_size_with_ecc();
 
 	/* global header */
 	if (!emit_4(total_size)) {
