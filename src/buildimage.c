@@ -16,7 +16,9 @@
  * by the Free Software Foundation.
  */
 
+#ifdef HAVE_CONFIG_H
 #include "buildimage_config.h"
+#endif
 
 #include <errno.h>
 #include <getopt.h>
@@ -68,7 +70,7 @@ static const struct option options[] = {
 	{ "data-partition", required_argument, NULL, 'd' },
 	{ "erase-block-size", required_argument, NULL, 'e' },
 	{ "flash-size", required_argument, NULL, 'f' },
-	{ "large-page", no_argument, NULL, 'l' },
+	{ "help", no_argument, NULL, 'h' },
 	{ "sector-size", required_argument, NULL, 's' },
 	{ NULL, 0, NULL, 0 },
 };
@@ -81,7 +83,7 @@ static bool large_page;
 /* reserve to two sectors plus 1% for badblocks, and round down */
 static inline size_t badblock_safe(size_t x)
 {
-	return (x - (erase_block_size * 2) - (x / 100)) & ~erase_block_size;
+	return x ? (x - (erase_block_size * 2) - (x / 100)) & ~erase_block_size : 0;
 }
 
 static inline size_t sector_size_with_ecc(void)
@@ -345,8 +347,8 @@ static bool partition_append(const char *option, fnc_encode_ecc encode)
 		return false;
 	}
 
-	fprintf(stderr, "Partition #%u: %llu of %zu bytes (%s)\n", num_partitions, val, badblock_safe(st.st_size), filename);
-	if (val > badblock_safe(st.st_size)) {
+	fprintf(stderr, "Partition #%u: %zu of %zu bytes (%s)\n", num_partitions, st.st_size, badblock_safe(val), filename);
+	if (st.st_size > badblock_safe(val)) {
 		fprintf(stderr, "Partition #%u (%s) is too big. This doesn't work. Sorry.", num_partitions, filename);
 		return false;
 	}
@@ -392,13 +394,31 @@ static bool parse_size(const char *option, unsigned long long *size)
 	return (errno == 0);
 }
 
+static const char usage[] =
+"Usage: buildimage <parameters> [...]\n"
+"\n"
+"  Mandatory parameters:\n"
+"    -a STRING      --arch=STRING\n"
+"    -e SIZE        --erase-block-size=SIZE\n"
+"    -s SIZE        --sector-size=SIZE\n"
+"\n"
+"  Optional parameters\n"
+"    -b SIZE:FILE   --boot-partition=SIZE:FILE\n"
+"    -d SIZE:FILE   --data-partition=SIZE:FILE\n"
+"    -f SIZE        --flash-size=SIZE\n"
+"\n"
+"  buildimage -a dm8000 -e 0x20000 -f 0x4000000 -s 2048 \\\n"
+"             -b 0x100000:secondstage-dm8000.bin -d 0x300000:boot.jffs2 \\\n"
+"             -d 0x3C00000:rootfs.jffs2 > dreambox-image-dm8000.nfi\n"
+"\n";
+
 int main(int argc, char *argv[])
 {
 	struct partition *p;
 	const char *arch = NULL;
 	int opt;
 
-	while ((opt = getopt_long(argc, argv, "a:b:d:e:f:lo:s:", options, NULL)) != -1) {
+	while ((opt = getopt_long(argc, argv, "a:b:d:e:f:ho:s:", options, NULL)) != -1) {
 		switch (opt) {
 		case 'a':
 			if (strlen(optarg) > 27) {
@@ -433,9 +453,9 @@ int main(int argc, char *argv[])
 				return EXIT_FAILURE;
 			}
 			break;
-		case 'l':
-			large_page = true;
-			break;
+		case 'h':
+			fprintf(stdout, usage);
+			return EXIT_SUCCESS;
 		case 's':
 			/* minimum: 512 bytes */
 			if (!parse_size(optarg, &sector_size) || (sector_size & 0x1ff)) {
@@ -444,15 +464,20 @@ int main(int argc, char *argv[])
 			}
 			break;
 		default:
-			fprintf(stderr, "Invalid arguments!\n");
+			fprintf(stderr, usage);
 			return EXIT_FAILURE;
 		}
 	}
 
-	if (optind < argc) {
-		fprintf(stderr, "Invalid arguments!\n");
+	if ((optind < argc) ||
+	    (erase_block_size == 0) ||
+	    (sector_size == 0)) {
+		fprintf(stderr, usage);
 		return EXIT_FAILURE;
 	}
+
+	if (sector_size > 512)
+		large_page = true;
 
 	spare_size = sector_size / 32;
 
@@ -485,7 +510,7 @@ int main(int argc, char *argv[])
 	unsigned int endptr = 0;
 	for (p = partitions; p != NULL; p = p->next) {
 		endptr += p->part_size;
-		if (!emit_4(endptr)) {
+		if (!emit_4(p->part_size ? endptr : 0)) {
 			fprintf(stderr, "Couldn't write partition pointer\n");
 			return EXIT_FAILURE;
 		}
