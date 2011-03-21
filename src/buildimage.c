@@ -77,7 +77,7 @@ static const struct option options[] = {
 
 static struct partition *partitions;
 static unsigned int num_partitions;
-static unsigned long long erase_block_size, spare_size, sector_size, flash_size;
+static size_t erase_block_size, spare_size, sector_size, flash_size;
 static bool large_page;
 
 /* reserve to two sectors plus 1% for badblocks, and round down */
@@ -331,7 +331,7 @@ static bool partition_append(const char *option, fnc_encode_ecc encode)
 {
 	const char *filename;
 	struct partition *p;
-	unsigned long long val;
+	size_t val;
 	struct stat st;
 	FILE *f;
 	char *end;
@@ -347,7 +347,9 @@ static bool partition_append(const char *option, fnc_encode_ecc encode)
 		return false;
 	}
 
-	fprintf(stderr, "Partition #%u: %zu of %zu bytes (%s)\n", num_partitions, st.st_size, badblock_safe(val), filename);
+	fprintf(stderr, "Partition #%u: %llu of %llu bytes (%s)\n",
+			num_partitions, (unsigned long long)st.st_size,
+			(unsigned long long)badblock_safe(val), filename);
 	if (st.st_size > badblock_safe(val)) {
 		fprintf(stderr, "Partition #%u (%s) is too big. This doesn't work. Sorry.", num_partitions, filename);
 		return false;
@@ -387,7 +389,7 @@ static bool partition_append(const char *option, fnc_encode_ecc encode)
 	return true;
 }
 
-static bool parse_size(const char *option, unsigned long long *size)
+static bool parse_size(const char *option, size_t *size)
 {
 	errno = 0;
 	*size = strtoull(optarg, NULL, 0);
