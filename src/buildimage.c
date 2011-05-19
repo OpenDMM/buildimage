@@ -64,7 +64,10 @@ static const unsigned char nand_ecc_precalc_table[] = {
 	0x00, 0x55, 0x56, 0x03, 0x59, 0x0c, 0x0f, 0x5a, 0x5a, 0x0f, 0x0c, 0x59, 0x03, 0x56, 0x55, 0x00,
 };
 
+static int broadcom_nand;
+
 static const struct option options[] = {
+	{ "brcmnand", no_argument, NULL, 'B' },
 	{ "arch", required_argument, NULL, 'a' },
 	{ "boot-partition", required_argument, NULL, 'b' },
 	{ "data-partition", required_argument, NULL, 'd' },
@@ -256,7 +259,41 @@ static void encode_jffs2(unsigned char *dst, unsigned char *src, int cnt)
 {
 	memset(dst, 0xFF, spare_size);
 
-	if (!large_page)
+	if (broadcom_nand) // hamming (broadcom slc nand hw ecc)
+	{
+		if (!(cnt & ((erase_block_size/sector_size)-1)))
+		{
+			if (large_page)
+			{
+				/* 0,1 is badblock indication
+				   6,7,8 is hw ecc
+				*/
+				dst[2]  = 0x85;
+				dst[3]  = 0x19;
+				dst[4] = 0x03;
+				dst[5] = 0x20;
+				dst[9] = 0x08;
+				dst[10] = 0x00;
+				dst[11] = 0x00;
+				dst[12] = 0x00;
+			}
+			else
+			{
+				/* 5 is badblock indication
+				   6,7,8 is hw ecc
+				*/
+				dst[0]  = 0x85;
+				dst[1]  = 0x19;
+				dst[2] = 0x03;
+				dst[3] = 0x20;
+				dst[4] = 0x08;
+				dst[9] = 0x00;
+				dst[10] = 0x00;
+				dst[11] = 0x00;
+			}
+		}
+	}
+	else if (!large_page)
 	{
 		unsigned char ecc_code[8];
 		nand_calculate_ecc (src, ecc_code);
@@ -272,16 +309,15 @@ static void encode_jffs2(unsigned char *dst, unsigned char *src, int cnt)
 
 		if (!(cnt & ((erase_block_size/sector_size)-1)))
 		{
-			dst[8]  = 0x19;
-			dst[9]  = 0x85;
-			dst[10] = 0x20;
-			dst[11] = 0x03;
-			dst[12] = 0x00;
+			dst[8]  = 0x85;
+			dst[9]  = 0x19;
+			dst[10] = 0x03;
+			dst[11] = 0x20;
+			dst[12] = 0x08;
 			dst[13] = 0x00;
 			dst[14] = 0x00;
-			dst[15] = 0x08;
-		} else
-			memset(dst + 8, 0xFF, 8);
+			dst[15] = 0x00;
+		}
 	} else
 	{
 		int i;
@@ -290,14 +326,14 @@ static void encode_jffs2(unsigned char *dst, unsigned char *src, int cnt)
 
 		if (!(cnt & ((erase_block_size/sector_size)-1)))
 		{
-			dst[2] = 0x19;
-			dst[3] = 0x85;
-			dst[4] = 0x20;
-			dst[5] = 0x03;
-			dst[6] = 0x00;
+			dst[2] = 0x85;
+			dst[3] = 0x19;
+			dst[4] = 0x03;
+			dst[5] = 0x20;
+			dst[6] = 0x08;
 			dst[7] = 0x00;
 			dst[8] = 0x00;
-			dst[9] = 0x08;
+			dst[9] = 0x00;
 		}
 	}
 }
@@ -408,6 +444,7 @@ static const char usage[] =
 "    -b SIZE:FILE   --boot-partition=SIZE:FILE\n"
 "    -d SIZE:FILE   --data-partition=SIZE:FILE\n"
 "    -f SIZE        --flash-size=SIZE\n"
+"    -B             --brcmnand\n"
 "\n"
 "  buildimage -a dm8000 -e 0x20000 -f 0x4000000 -s 2048 \\\n"
 "             -b 0x100000:secondstage-dm8000.bin -d 0x300000:boot.jffs2 \\\n"
@@ -458,6 +495,9 @@ int main(int argc, char *argv[])
 		case 'h':
 			fprintf(stdout, usage);
 			return EXIT_SUCCESS;
+		case 'B':
+			broadcom_nand = 1;
+			break;
 		case 's':
 			/* minimum: 512 bytes */
 			if (!parse_size(optarg, &sector_size) || (sector_size & 0x1ff)) {
