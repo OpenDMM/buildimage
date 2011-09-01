@@ -523,9 +523,10 @@ int main(int argc, char *argv[])
 
 	spare_size = sector_size / 32;
 
-	/* write NFI1 header */
+	/* write NFI1/2 header */
 	if (arch != NULL) {
-		char header[32] = "NFI1";
+		char header[32];
+		strcpy(header, broadcom_nand ? "NFI2" : "NFI1");
 		strncpy(header + 4, arch, 28);
 		if (!safe_write(1, header, 32)) {
 			fprintf(stderr, "Couldn't write NFI header!\n");
