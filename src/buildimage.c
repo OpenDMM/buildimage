@@ -74,6 +74,7 @@ static const struct option options[] = {
 	{ "erase-block-size", required_argument, NULL, 'e' },
 	{ "flash-size", required_argument, NULL, 'f' },
 	{ "help", no_argument, NULL, 'h' },
+	{ "raw", no_argument, NULL, 'r' },
 	{ "sector-size", required_argument, NULL, 's' },
 	{ NULL, 0, NULL, 0 },
 };
@@ -82,6 +83,7 @@ static struct partition *partitions;
 static unsigned int num_partitions;
 static size_t erase_block_size, spare_size, sector_size, flash_size;
 static bool large_page;
+static bool raw;
 
 /* reserve to two sectors plus 1% for badblocks, and round down */
 static inline size_t badblock_safe(size_t x)
@@ -193,6 +195,10 @@ static bool safe_write(int fd, const unsigned char *buf, size_t count)
 static bool emit_4(unsigned int val)
 {
 	unsigned char buf[4];
+
+	/* don't output headers in raw mode */
+	if (raw)
+		return true;
 
 	buf[0] = (val >> 24) & 0xff;
 	buf[1] = (val >> 16) & 0xff;
@@ -444,6 +450,7 @@ static const char usage[] =
 "    -b SIZE:FILE   --boot-partition=SIZE:FILE\n"
 "    -d SIZE:FILE   --data-partition=SIZE:FILE\n"
 "    -f SIZE        --flash-size=SIZE\n"
+"    -r             --raw\n"
 "    -B             --brcmnand\n"
 "\n"
 "  buildimage -a dm8000 -e 0x20000 -f 0x4000000 -s 2048 \\\n"
@@ -457,7 +464,7 @@ int main(int argc, char *argv[])
 	const char *arch = NULL;
 	int opt;
 
-	while ((opt = getopt_long(argc, argv, "a:b:d:e:f:ho:s:", options, NULL)) != -1) {
+	while ((opt = getopt_long(argc, argv, "a:b:d:e:f:ho:rs:", options, NULL)) != -1) {
 		switch (opt) {
 		case 'a':
 			if (strlen(optarg) > 27) {
@@ -498,6 +505,9 @@ int main(int argc, char *argv[])
 		case 'B':
 			broadcom_nand = 1;
 			break;
+		case 'r':
+			raw = true;
+			break;
 		case 's':
 			/* minimum: 512 bytes */
 			if (!parse_size(optarg, &sector_size) || (sector_size & 0x1ff)) {
@@ -524,7 +534,7 @@ int main(int argc, char *argv[])
 	spare_size = sector_size / 32;
 
 	/* write NFI1/2 header */
-	if (arch != NULL) {
+	if (!raw && arch != NULL) {
 		char header[32];
 		strcpy(header, broadcom_nand ? "NFI2" : "NFI1");
 		strncpy(header + 4, arch, 28);
