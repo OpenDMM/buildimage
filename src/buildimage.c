@@ -29,7 +29,7 @@
 #include <sys/stat.h>
 #include <unistd.h>
 
-typedef void (*fnc_encode_ecc)(unsigned char *dst, unsigned char *src, int cnt);
+typedef void (*fnc_encode_ecc)(unsigned char *dst, const unsigned char *src, unsigned int cnt);
 
 struct partition {
 	struct partition *next;
@@ -64,10 +64,9 @@ static const unsigned char nand_ecc_precalc_table[] = {
 	0x00, 0x55, 0x56, 0x03, 0x59, 0x0c, 0x0f, 0x5a, 0x5a, 0x0f, 0x0c, 0x59, 0x03, 0x56, 0x55, 0x00,
 };
 
-static int broadcom_nand;
-
 static const struct option options[] = {
 	{ "brcmnand", no_argument, NULL, 'B' },
+	{ "hw-ecc", no_argument, NULL, 'H' },
 	{ "arch", required_argument, NULL, 'a' },
 	{ "boot-partition", required_argument, NULL, 'b' },
 	{ "data-partition", required_argument, NULL, 'd' },
@@ -82,6 +81,8 @@ static const struct option options[] = {
 static struct partition *partitions;
 static unsigned int num_partitions;
 static size_t erase_block_size, spare_size, sector_size, flash_size;
+static bool broadcom_nand;
+static bool hw_ecc;
 static bool large_page;
 static bool raw;
 
@@ -208,63 +209,59 @@ static bool emit_4(unsigned int val)
 	return safe_write(1, buf, 4);
 }
 
-static void encode_hevers(unsigned char *dst, unsigned char *src, int count)
+static void encode_hevers(unsigned char *dst, const unsigned char *src, unsigned int count)
 {
-	if (!large_page)
-	{
+	if (!large_page) {
 		dst[0] = count >> 8;
 		dst[1] = count & 0xFF;
-		unsigned char temp;
-		int cnt;
-		for(cnt=0; cnt<sector_size; cnt++)
-		{
-			temp=src[cnt];
-			dst[2]^=temp;
-			if(cnt & 1) 
-				dst[6 + 0]^=temp;
-			else 
-				dst[6 + 1]^=temp;
-			if(cnt & 2) dst[6 + 2]^=temp;
-			if(cnt & 4) dst[6 + 3]^=temp;
-			if(cnt & 8) dst[6 + 4]^=temp;
-			if(cnt & 16) dst[6 + 5]^=temp;
-			if(cnt & 32) dst[6 + 6]^=temp;
-			if(cnt & 64) dst[6 + 7]^=temp;
-			if(cnt & 128) dst[6 + 8]^=temp;
-			if(cnt & 256) dst[6 + 9]^=temp;
+		if (!hw_ecc) {
+			unsigned char temp;
+			size_t cnt;
+			for (cnt = 0; cnt < sector_size; cnt++) {
+				temp = src[cnt];
+				dst[2] ^= temp;
+				if (cnt & 1)
+					dst[6 + 0] ^= temp;
+				else
+					dst[6 + 1] ^= temp;
+				if (cnt & 2) dst[6 + 2] ^= temp;
+				if (cnt & 4) dst[6 + 3] ^= temp;
+				if (cnt & 8) dst[6 + 4] ^= temp;
+				if (cnt & 16) dst[6 + 5] ^= temp;
+				if (cnt & 32) dst[6 + 6] ^= temp;
+				if (cnt & 64) dst[6 + 7] ^= temp;
+				if (cnt & 128) dst[6 + 8] ^= temp;
+				if (cnt & 256) dst[6 + 9] ^= temp;
+			}
 		}
-	} else
-	{
-		dst[0] = 0xFF;
-		dst[1] = 0xFF;
+	} else {
 		dst[2] = count >> 8;
 		dst[3] = count & 0xFF;
-		unsigned char temp;
-		int cnt;
-		for(cnt=0; cnt<sector_size; cnt++)
-		{
-			temp=src[cnt];
-			dst[40]^=temp;
-			if(cnt & 1) 
-				dst[41]^=temp;
-			else 
-				dst[42]^=temp;
-			if(cnt & 2) dst[43]^=temp;
-			if(cnt & 4) dst[44]^=temp;
-			if(cnt & 8) dst[45]^=temp;
-			if(cnt & 16) dst[46]^=temp;
-			if(cnt & 32) dst[47]^=temp;
-			if(cnt & 64) dst[48]^=temp;
-			if(cnt & 128) dst[49]^=temp;
-			if(cnt & 256) dst[50]^=temp;
+		if (!hw_ecc) {
+			unsigned char temp;
+			size_t cnt;
+			for (cnt = 0; cnt < sector_size; cnt++) {
+				temp = src[cnt];
+				dst[40] ^= temp;
+				if (cnt & 1)
+					dst[41] ^= temp;
+				else
+					dst[42] ^= temp;
+				if (cnt & 2) dst[43] ^= temp;
+				if (cnt & 4) dst[44] ^= temp;
+				if (cnt & 8) dst[45] ^= temp;
+				if (cnt & 16) dst[46] ^= temp;
+				if (cnt & 32) dst[47] ^= temp;
+				if (cnt & 64) dst[48] ^= temp;
+				if (cnt & 128) dst[49] ^= temp;
+				if (cnt & 256) dst[50] ^= temp;
+			}
 		}
 	}
 }
 
-static void encode_jffs2(unsigned char *dst, unsigned char *src, int cnt)
+static void encode_jffs2(unsigned char *dst, const unsigned char *src, unsigned int cnt)
 {
-	memset(dst, 0xFF, spare_size);
-
 	if (broadcom_nand) // hamming (broadcom slc nand hw ecc)
 	{
 		if (!(cnt & ((erase_block_size/sector_size)-1)))
@@ -452,6 +449,7 @@ static const char usage[] =
 "    -f SIZE        --flash-size=SIZE\n"
 "    -r             --raw\n"
 "    -B             --brcmnand\n"
+"    -H             --hw-ecc (for boot partition)\n"
 "\n"
 "  buildimage -a dm8000 -e 0x20000 -f 0x4000000 -s 2048 \\\n"
 "             -b 0x100000:secondstage-dm8000.bin -d 0x300000:boot.jffs2 \\\n"
@@ -464,8 +462,14 @@ int main(int argc, char *argv[])
 	const char *arch = NULL;
 	int opt;
 
-	while ((opt = getopt_long(argc, argv, "a:b:d:e:f:ho:rs:", options, NULL)) != -1) {
+	while ((opt = getopt_long(argc, argv, "BHa:b:d:e:f:ho:rs:", options, NULL)) != -1) {
 		switch (opt) {
+		case 'B':
+			broadcom_nand = true;
+			break;
+		case 'H':
+			hw_ecc = true;
+			break;
 		case 'a':
 			if (strlen(optarg) > 27) {
 				fprintf(stderr, "Invalid arch!\n");
@@ -502,9 +506,6 @@ int main(int argc, char *argv[])
 		case 'h':
 			fprintf(stdout, usage);
 			return EXIT_SUCCESS;
-		case 'B':
-			broadcom_nand = 1;
-			break;
 		case 'r':
 			raw = true;
 			break;
