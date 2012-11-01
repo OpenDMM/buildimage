@@ -540,7 +540,7 @@ int main(int argc, char *argv[])
 		strcpy(header, "NFI1");
 
 		/* DM7020HD with 128K eraseblock size nand flash needs NFI3 header */
-		if (erase_block_size == 128*1024 && sector_size == 2*1024)
+		if (erase_block_size == 128*1024 && sector_size == 2*1024 && !strncmp(arch, "dm7020hd", 8))
 			header[3] = '3';
 		else if (broadcom_nand)
 			header[3] = '2';
