@@ -537,7 +537,14 @@ int main(int argc, char *argv[])
 	/* write NFI1/2 header */
 	if (!raw && arch != NULL) {
 		char header[32];
-		strcpy(header, broadcom_nand ? "NFI2" : "NFI1");
+		strcpy(header, "NFI1");
+
+		/* DM7020HD with 128K eraseblock size nand flash needs NFI3 header */
+		if (erase_block_size == 128*1024 && sector_size == 2*1024)
+			header[3] = '3';
+		else if (broadcom_nand)
+			header[3] = '2';
+
 		strncpy(header + 4, arch, 28);
 		if (!safe_write(1, header, 32)) {
 			fprintf(stderr, "Couldn't write NFI header!\n");
