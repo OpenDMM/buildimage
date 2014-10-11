@@ -537,10 +537,15 @@ int main(int argc, char *argv[])
 	/* write NFI1/2 header */
 	if (!raw && arch != NULL) {
 		char header[32];
+		memset(header, 0, 32);
 		strcpy(header, "NFI1");
 
+		/* This is what the bootloader expects */
+		if (!strcmp(arch, "dm7020hdv2"))
+			arch = "dm7020hd";
+
 		/* DM7020HD with 128K eraseblock size nand flash needs NFI3 header */
-		if (erase_block_size == 128*1024 && sector_size == 2*1024 && !strncmp(arch, "dm7020hd", 8))
+		if (erase_block_size == 128*1024 && sector_size == 2*1024 && !strcmp(arch, "dm7020hd"))
 			header[3] = '3';
 		else if (broadcom_nand)
 			header[3] = '2';
