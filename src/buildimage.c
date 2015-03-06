@@ -551,6 +551,10 @@ int main(int argc, char *argv[])
 			header[3] = '2';
 
 		strncpy(header + 4, arch, 28);
+
+		if (erase_block_size == 128*1024 && sector_size == 2*1024)
+			header[31] |= 1; // all images with this marker are ready for v2 boxes with toshiba nand flash (needs new kernel and new 2nd stage)
+
 		if (!safe_write(1, header, 32)) {
 			fprintf(stderr, "Couldn't write NFI header!\n");
 			return EXIT_FAILURE;
