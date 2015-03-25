@@ -1,7 +1,7 @@
 #                                               -*- Autoconf -*-
 # Process this file with autoconf to produce a configure script.
 
-AC_INIT([buildimage],[1.2],[enigma2-devel@lists.elitedvb.net])
+AC_INIT([buildimage],[1.5],[enigma2-devel@lists.elitedvb.net])
 AC_CONFIG_SRCDIR([src/buildimage.c])
 AC_CONFIG_HEADERS([buildimage_config.h])
 AM_INIT_AUTOMAKE([dist-bzip2 foreign no-define tar-pax])
